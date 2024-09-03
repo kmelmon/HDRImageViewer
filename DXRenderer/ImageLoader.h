@@ -18,7 +18,6 @@
 #pragma once
 #include "Common\DeviceResources.h"
 #include "ImageInfo.h"
-#include "LibHeifHelpers.h"
 
 #include <cstdarg>
 
@@ -146,8 +145,7 @@ namespace DXRenderer
         /// </summary>
 #define IFRF(hr) if (FAILED(hr)) { return false; }
 
-        inline HRESULT HEIFHR(heif_error herr) { return herr.code == heif_error_code::heif_error_Ok ? S_OK : WINCODEC_ERR_GENERIC_ERROR; }
-
+        
         void LoadImageFromWicInt(_In_ IStream* imageStream);
         void LoadImageFromDirectXTexInt(_In_ Platform::String^ filename, _In_ Platform::String^ extension);
         void LoadImageCommon(_In_ IWICBitmapSource* source);
@@ -160,15 +158,12 @@ namespace DXRenderer
         bool CheckCanDecode(_In_ IWICBitmapFrameDecode* frame);
         void CreateHeifHdr10CpuResources(_In_ IWICBitmapSource* source);
         void CreateHeifHdr10GpuResources();
-        bool TryLoadAppleHdrGainMapHeic(_In_ IStream* imageStream);
-        bool TryLoadAppleHdrGainMapJpegMpo(_In_ IStream* imageStream, _In_ IWICBitmapFrameDecode* frame);
 
         std::shared_ptr<DeviceResources>                        m_deviceResources;
 
         // Device-independent
         Microsoft::WRL::ComPtr<IWICBitmapSource>                m_wicCachedSource;
         Microsoft::WRL::ComPtr<IWICColorContext>                m_wicColorContext;
-        CHeifImageWithWicSource                                 m_appleHdrGainMap;
 
         ImageLoaderState                                        m_state;
         ImageInfo                                               m_imageInfo;

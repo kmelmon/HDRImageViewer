@@ -26,5 +26,3 @@
 #include <wincodecsdk.h> // JPEG MPO support
 #include <DirectXMath.h>
 #include <windowsnumerics.h>
-
-#include <libheif/heif.h>

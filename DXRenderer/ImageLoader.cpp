@@ -125,7 +125,7 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
         }
 
         // NOTE: Pixel resolution check can't be done until the main image has been decoded (LoadImageCommon).
-        m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapHeic(imageStream);
+        m_imageInfo.hasAppleHdrGainMap = false;
     }
     else if (fmt == GUID_ContainerFormatWmp)
     {
@@ -137,7 +137,7 @@ void ImageLoader::LoadImageFromWicInt(_In_ IStream* imageStream)
     }
     else if (fmt == GUID_ContainerFormatJpeg)
     {
-        m_imageInfo.hasAppleHdrGainMap = TryLoadAppleHdrGainMapJpegMpo(imageStream, frame.Get());
+        m_imageInfo.hasAppleHdrGainMap = false;
     }
 
     LoadImageCommon(frame.Get());
@@ -298,18 +298,12 @@ void ImageLoader::LoadImageCommon(_In_ IWICBitmapSource* source)
     IFRIMG(source->GetSize(&width, &height));
     m_imageInfo.pixelSize = Size(static_cast<float>(width), static_cast<float>(height));
 
-    // Gainmaps generally are 1/2 pixel size of the main image, but we don't restrict this.
-    if (m_imageInfo.hasAppleHdrGainMap == true)
-    {
-        UINT mapwidth = 0, mapheight = 0;
-        IFRIMG(m_appleHdrGainMap.wicSource->GetSize(&mapwidth, &mapheight));
-        m_imageInfo.gainMapPixelSize = Size(static_cast<float>(mapwidth), static_cast<float>(mapheight));
-    }
 
     if (m_imageInfo.isHeif == true &&
         m_imageInfo.forceBT2100ColorSpace == true)
     {
-        CreateHeifHdr10CpuResources(source);
+        //CreateHeifHdr10CpuResources(source);
+        DebugBreak();
 
         if (m_state == ImageLoaderState::LoadingFailed) return;
     }
@@ -480,200 +474,6 @@ void ImageLoader::CreateHeifHdr10GpuResources()
 }
 
 /// <summary>
-/// Checks if the HEIC image contains an Apple HDR gainmap. If true, initializes the gainmap bitmap.
-/// </summary>
-/// <param name="imageStream"></param>
-/// <returns></returns>
-bool ImageLoader::TryLoadAppleHdrGainMapHeic(IStream* imageStream)
-{
-    STATSTG stats = {};
-    HRESULT hr = imageStream->Stat(&stats, STATFLAG_NONAME);
-
-    unsigned int sizeBytes = static_cast<unsigned int>(stats.cbSize.QuadPart);
-
-    // Image is too large, give up.
-    IFRF(sizeBytes != stats.cbSize.QuadPart ? E_FAIL : S_OK);
-
-    std::vector<byte> fileBuf(sizeBytes);
-
-    ULARGE_INTEGER seeked = {};
-    imageStream->Seek({}, STREAM_SEEK_SET, &seeked);
-
-    ULONG cbRead = 0;
-    hr = imageStream->Read(fileBuf.data(), static_cast<ULONG>(fileBuf.size()), &cbRead);
-
-    CHeifContext ctx;
-    IFRF(HEIFHR(heif_context_read_from_memory_without_copy(ctx.ptr, fileBuf.data(), fileBuf.size(), nullptr)));
-
-    CHeifHandle mainHandle;
-    IFRF(HEIFHR(heif_context_get_primary_image_handle(ctx.ptr, &mainHandle.ptr)));
-
-    int countAux = heif_image_handle_get_number_of_auxiliary_images(mainHandle.ptr, 0);
-    std::vector<heif_item_id> auxIds(countAux);
-    heif_image_handle_get_list_of_auxiliary_image_IDs(mainHandle.ptr, 0, auxIds.data(), static_cast<int>(auxIds.size()));
-
-    for (auto i : auxIds)
-    {
-        CHeifHandle auxHandle;
-        IFRF(HEIFHR(heif_image_handle_get_auxiliary_image_handle(mainHandle.ptr, i, &auxHandle.ptr)));
-
-        CHeifAuxType type;
-        IFRF(HEIFHR(heif_image_handle_get_auxiliary_type(auxHandle.ptr, &type.ptr)));
-
-        if (type.IsAppleHdrGainMap())
-        {
-            IFRF(HEIFHR(heif_decode_image(auxHandle.ptr, &m_appleHdrGainMap.ptr, heif_colorspace_monochrome, heif_chroma_monochrome, 0)));
-
-            int width = heif_image_get_primary_width(m_appleHdrGainMap.ptr);
-            int height = heif_image_get_primary_height(m_appleHdrGainMap.ptr);
-            int bitdepth = heif_image_get_bits_per_pixel_range(m_appleHdrGainMap.ptr, heif_channel_Y);
-
-            if (bitdepth != 8) return false; // Defer checking main image resolution until it is available later in decode process.
-
-            int stride = 0;
-            uint8_t* data = heif_image_get_plane(m_appleHdrGainMap.ptr, heif_channel_Y, &stride);
-
-            auto fact = m_deviceResources->GetWicImagingFactory();
-
-            // Memory and object lifetime is synchronized with CHeifImageWithWicBitmap.
-            ComPtr<IWICBitmap> bitmap;
-
-            IFRF(fact->CreateBitmapFromMemory(
-                width,
-                height,
-                GUID_WICPixelFormat8bppGray,
-                stride,
-                stride * height,
-                static_cast<BYTE *>(data),
-                &bitmap));
-
-            ComPtr<IWICFormatConverter> fmt;
-            IFRF(fact->CreateFormatConverter(&fmt));
-            IFRF(fmt->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom));
-
-            IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
-
-            // Immediately return once we have a gain map.
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/// <summary>
-/// Checks if a JPEG image contains an Apple HDR gainmap stored in an MPO (Multi picture object). If true, initializes the gainmap bitmap.
-/// </summary>
-/// <param name="imageStream">Underlying stream is needed since we have to manually setup WIC to read the second Individual Image.</param>
-/// <param name="frame"></param>
-/// <returns></returns>
-bool ImageLoader::TryLoadAppleHdrGainMapJpegMpo(IStream* imageStream, IWICBitmapFrameDecode* frame)
-{
-    auto fact = m_deviceResources->GetWicImagingFactory();
-
-    // Heuristic: Allow any Apple manufactured device.
-    ComPtr<IWICMetadataQueryReader> query;
-    CPropVariant appleMftr;
-
-    IFRF(frame->GetMetadataQueryReader(&query));
-    IFRF(query->GetMetadataByName(L"/app1/ifd/{ushort=271}", &appleMftr));
-
-    if (appleMftr.vt != VT_LPSTR) return false;
-    if (strcmp("Apple", appleMftr.pszVal) != 0) return false;
-
-    // Find the APP2 MP Extensions block
-    ComPtr<IWICMetadataBlockReader> blockReader;
-    IFRF(frame->QueryInterface(IID_PPV_ARGS(&blockReader)));
-
-    UINT count = 0;
-    IFRF(blockReader->GetCount(&count));
-
-    ULARGE_INTEGER gainmapOffset = {};
-
-    // WIC doesn't natively understand the APP2 MPF block so we have to iterate and look for it ourselves.
-    for (UINT i = 0; i < count; i++)
-    {
-        ComPtr<IWICMetadataReader> reader;
-        IFRF(blockReader->GetReaderByIndex(i, &reader));
-
-        // NOTE: From this point in the loop, any failures should just continue to the next block.
-        GUID metaFmt = {};
-        IFRF(reader->GetMetadataFormat(&metaFmt));
-        if (metaFmt != GUID_MetadataFormatUnknown) continue;
-
-        CPropVariant id, value;
-        IFRF(reader->GetValueByIndex(0, nullptr, &id, &value));
-        if (value.vt != 65) continue; // VT_BLOB
-        if (value.blob.cbSize != sizeof(m_appleApp2MPBlock)) continue;
-
-        // Grab the offset before it's wiped out by the validity check.
-        assert(m_appleApp2MPBlockMagicOffset < value.blob.cbSize);
-
-        // The known APP2 header specifies Big Endian.
-        ULARGE_INTEGER tempOffset = {};
-        tempOffset.QuadPart =
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 0] << 24 |
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 1] << 16 |
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 2] << 8  |
-            value.blob.pBlobData[m_appleApp2MPBlockMagicOffset + 3];
-
-        // Fill in the known dynamic bytes with dummy values (0xFF).
-        for (int j = 0; j < ARRAYSIZE(m_appleApp2MPBlockDynamicBytes); j++)
-        {
-            assert(m_appleApp2MPBlockDynamicBytes[j] < value.blob.cbSize);
-            value.blob.pBlobData[m_appleApp2MPBlockDynamicBytes[j]] = 0xFF;
-        }
-
-        // A not so robust check against magic values since this is much simpler than a true parser.
-        if (memcmp(value.blob.pBlobData, m_appleApp2MPBlock, sizeof(m_appleApp2MPBlock)) != 0) continue;
-
-        // If we get here we've validated all of the data we can in the primary image and should move to the second image.
-        gainmapOffset = tempOffset;
-        break;
-    }
-
-    if (gainmapOffset.QuadPart == 0) return false;
-
-    // Initialize the secondary image (HDR gainmap) and validate it.
-    // TODO: Apple MPO images may have a gap between the primary image EOI and second image SOI.
-    ULARGE_INTEGER ignore = {};
-    STATSTG stats = {};
-    IFRF(imageStream->Stat(&stats, STATFLAG_NONAME));
-
-    // Separate streams are needed because we have two live decoders.
-    ULARGE_INTEGER region = {};
-    region.QuadPart = stats.cbSize.QuadPart - gainmapOffset.QuadPart;
-    ComPtr<IWICStream> gainmapStream;
-    IFRF(fact->CreateStream(&gainmapStream));
-    IFRF(gainmapStream->InitializeFromIStreamRegion(imageStream, gainmapOffset, region));
-
-    ComPtr<IWICBitmapDecoder> gainmapDecoder;
-    IFRF(fact->CreateDecoderFromStream(gainmapStream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, &gainmapDecoder));
-    ComPtr<IWICBitmapFrameDecode> gainmapFrame;
-    IFRF(gainmapDecoder->GetFrame(0, &gainmapFrame));
-    ComPtr<IWICMetadataQueryReader> gainmapQuery;
-    IFRF(gainmapFrame->GetMetadataQueryReader(&gainmapQuery));
-
-    CPropVariant gainmapAuxType;
-    IFRF(gainmapQuery->GetMetadataByName(L"/xmp/{wstr=http://ns.apple.com/pixeldatainfo/1.0/}:AuxiliaryImageType", &gainmapAuxType));
-    if (wcscmp(gainmapAuxType.pwszVal, L"urn:com:apple:photo:2020:aux:hdrgainmap") != 0) return false;
-
-    CPropVariant gainmapVersion;
-    IFRF(gainmapQuery->GetMetadataByName(L"/xmp/{wstr=http://ns.apple.com/HDRGainMap/1.0/}:HDRGainMapVersion", &gainmapVersion));
-    if (wcscmp(gainmapVersion.pwszVal, L"65536") != 0) return false;
-
-    // All validated, now grab the data.
-    ComPtr<IWICFormatConverter> fmt;
-    IFRF(fact->CreateFormatConverter(&fmt));
-    IFRF(fmt->Initialize(gainmapFrame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom));
-
-    // Just stuff the WIC pointer in here even though we don't have an associated heif_image.
-    IFRF(fmt.As(&m_appleHdrGainMap.wicSource));
-
-    return true;
-}
-
-/// <summary>
 /// (Re)initializes all long-lived device dependent resources.
 /// </summary>
 void ImageLoader::CreateDeviceDependentResourcesInternal()
@@ -696,12 +496,6 @@ void ImageLoader::CreateDeviceDependentResourcesInternal()
         IFRIMG(wicImageSource.As(&m_imageSource));
     }
 
-    if (m_imageInfo.hasAppleHdrGainMap)
-    {
-        ComPtr<ID2D1ImageSourceFromWic> wicGainMapSource;
-        IFRIMG(context->CreateImageSourceFromWic(m_appleHdrGainMap.wicSource.Get(), &wicGainMapSource));
-        IFRIMG(wicGainMapSource.As(&m_hdrGainMapSource));
-    }
 
     // Xbox One HDR screenshots and HEIF HDR images use the HDR10/BT.2100 colorspace, but this is not represented
     // in a WIC color context so we must manually set behavior.
