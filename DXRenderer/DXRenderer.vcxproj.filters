@@ -78,7 +78,6 @@
     </ClInclude>
     <ClInclude Include="RenderOptions.h" />
     <ClInclude Include="Matrix.h" />
-    <ClInclude Include="LibHeifHelpers.h" />
     <ClInclude Include="RenderEffects\MaxLuminanceEffect.h">
       <Filter>Resources\RenderEffects</Filter>
     </ClInclude>

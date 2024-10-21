@@ -304,6 +304,9 @@ namespace HDRImageViewerCS
 
                 var dispcll = enableExperimentalTools ? (float)DispMaxCLLOverrideSlider.Value : 0.0f;
 
+                var kind = tm.Kind;
+                var sliderToExposure = (float)SdrExposureFormatter.SliderToExposure(ExposureAdjustSlider.Value);
+
                 renderer.SetRenderOptions(
                     tm.Kind,
                     (float)SdrExposureFormatter.SliderToExposure(ExposureAdjustSlider.Value),

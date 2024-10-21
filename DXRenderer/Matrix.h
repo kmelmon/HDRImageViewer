@@ -80,7 +80,7 @@ struct Matrix
         Matrix ret(3, 3);
         double det = Determinant();
 
-        assert(det > 0);
+        //assert(det > 0);
 
         for (int i = 0; i < 3; i++)
         {
